@@ -1,0 +1,15 @@
+prompts:
+  - task: content_safety_check_input $model=content_safety
+    messages:
+      - type: user
+        content: "{{ user_input }}"
+    output_parser: nemotron_content_safety_parse_prompt_safety
+    max_tokens: 2048
+  - task: content_safety_check_output $model=content_safety
+    messages:
+      - type: user
+        content: "{{ user_input }}"
+      - type: assistant
+        content: "{{ bot_response }}"
+    output_parser: nemotron_content_safety_parse_response_safety
+    max_tokens: 2048

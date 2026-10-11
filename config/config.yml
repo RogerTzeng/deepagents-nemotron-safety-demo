@@ -1,0 +1,19 @@
+models:
+  - type: content_safety
+    engine: nim
+    model: nvidia/nemotron-3.5-content-safety
+    api_key_env_var: SAFETY_API_KEY
+    parameters:
+      timeout: 60
+      max_retries: 0
+      chat_template_kwargs:
+        enable_thinking: true
+        request_categories: /categories
+
+rails:
+  input:
+    flows:
+      - content safety check input $model=content_safety
+  output:
+    flows:
+      - content safety check output $model=content_safety

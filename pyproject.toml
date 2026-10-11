@@ -1,0 +1,26 @@
+[project]
+name = "deepagents-safety-demo"
+version = "0.1.0"
+description = "Deep Agents with Nemotron 3.5 content safety and custom policies"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "deepagents>=0.4,<0.5",
+    "langchain-openai>=1.1,<2",
+    "langchain-google-genai>=4.2,<5",
+    "openai>=2,<3",
+    "python-dotenv>=1,<2",
+    "nemoguardrails>=0.24,<0.25",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.uv.sources]
+nemoguardrails = { git = "https://github.com/NVIDIA-NeMo/Guardrails.git", rev = "54692ca7fbb1d97855d8991e97dcaa6fd1a1ae16" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

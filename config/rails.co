@@ -1,0 +1,11 @@
+define bot refuse to respond
+  "I cannot provide that information due to company policy."
+
+# Tool-calling turns can have empty content. The official middleware checks content,
+# not tool_calls; inspect nonempty responses without disabling final output checks.
+define flow content safety check output
+  if $bot_message
+    $response = execute content_safety_check_output(model_name="content_safety")
+    if $response.is_blocked
+      bot refuse to respond
+      stop
