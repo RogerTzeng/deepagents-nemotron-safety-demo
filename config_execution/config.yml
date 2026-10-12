@@ -1,0 +1,5 @@
+models: []
+rails:
+  tool_input:
+    flows:
+      - inspect reference result

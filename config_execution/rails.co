@@ -1,0 +1,9 @@
+define flow inspect reference result
+  $inspection = execute inspect_reference_result(tool_message=$tool_message)
+  if not $inspection.allowed
+    bot refuse tool result
+    abort
+  $tool_message = $inspection.content
+
+define bot refuse tool result
+  "The tool result was blocked before it reached the agent."
