@@ -137,3 +137,52 @@ uv run --locked ruff format --check .
 ```
 
 Tests use real NeMo configuration and official middleware with fake provider responses. They verify policy placement in model parameters and the HTTP payload, input/output blocking, provider-error blocking, empty tool turns, Gemini text-block preservation, and a full Deep Agents tool round trip. The ChatOpenAI tests use the actual SDK with mocked HTTP responses to verify allowed answers, input/output refusals, and safety-provider failures. Mocked classifications verify integration behavior; they do not establish a live endpoint's custom-policy enforcement.
+# Streaming Deep Agents output
+
+Run `uv run python streaming_demo.py` (or `.venv/bin/python streaming_demo.py`)
+with `STREAM_API_KEY` (NVIDIA) and `SAFETY_API_KEY` in `.env`.
+The streaming agent uses `ChatOpenAI` with `z-ai/glm-5.3` at
+`https://integrate.api.nvidia.com/v1`; `STREAM_MODEL` and `STREAM_BASE_URL`
+override these defaults. Its request timeout is 300 seconds because the live
+GLM endpoint can take several minutes. Other demos retain their agent settings.
+An optional positional prompt replaces `Fetch and summarize scenario: public`.
+
+`streaming_demo.py` connects a real Deep Agent's `astream(stream_mode="messages")`
+to NeMo's native `LLMRails.stream_async(generator=...)`. Only model text is
+forwarded; tool payloads are not displayed. The agent keeps the execution demo's
+tool argument and result rails. Its user-facing text is checked by Nemotron 3.5
+Content Safety with the existing `policy.txt` and `config/` output rail.
+This demo focuses on output checking; it does not enable user input content rails.
+
+The streaming settings are applied in `build_streaming_rails()`:
+
+```yaml
+rails:
+  output:
+    streaming:
+      enabled: true
+      chunk_size: 16
+      context_size: 4
+      stream_first: false
+```
+
+NeMo buffers the external stream, inspects a window, then releases approved text.
+In this installed version the buffer counts yielded string pieces, which may
+contain multiple model tokens. Context overlap helps checks across boundaries;
+it does not provide the full response. Short answers may arrive as one batch.
+Each window requires a safety model request, adding latency and API usage.
+
+The native streaming runner resolves the action from the configured Colang output
+flow and uses its `RailOutcome`; it does not execute the entire Colang dialogue
+flow for every window. It sends a JSON error item on rejection or inspection
+failure. The demo converts that item into a stop notification and closes the
+source stream. Earlier approved text remains visible; streaming checks cannot
+retract it or guarantee detection of violations requiring later context. Agent
+state and tracing can still contain raw output: this protects the display boundary.
+
+`tests/test_streaming_demo.py` runs a real compiled Deep Agent with a scripted
+streaming model and real NeMo buffering. It covers tool execution, multiple
+windows, rejection after approved text, inspector failure, custom policy loading,
+and the native content safety action with scripted classifier responses.
+
+Official reference: [NeMo output rail streaming](https://docs.nvidia.com/nemo/guardrails/configure-guardrails/yaml-schema/streaming/output-rail-streaming).
