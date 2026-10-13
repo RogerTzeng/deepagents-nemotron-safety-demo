@@ -1,4 +1,4 @@
-"""Inspect a tool result with NeMo's tool-input rail before handing it to a model."""
+"""Inspect tool arguments before execution and tool results before agent continuation."""
 
 import argparse
 import asyncio
@@ -60,46 +60,73 @@ async def inspect_reference_result(tool_message):
     }
 
 
-async def inspect_with_rails(raw_result, tool_call_id="reference-1"):
+async def inspect_reference_call(tool_calls):
+    """Allow only the demo tool and its explicitly supported arguments."""
+    if len(tool_calls) != 1 or tool_calls[0].get("name") != "fetch_reference":
+        return {"allowed": False, "status": "blocked", "reason": "Tool not enabled in demo"}
+    args = tool_calls[0].get("args")
+    if (
+        not isinstance(args, dict)
+        or set(args) != {"scenario"}
+        or not isinstance(args["scenario"], str)
+        or args["scenario"] not in SCENARIOS
+    ):
+        return {"allowed": False, "status": "blocked", "reason": "Unsupported tool arguments"}
+    return {"allowed": True, "status": "passed", "reason": "Tool arguments approved"}
+
+
+async def _run_inspection(event, action, action_name, finished_event):
     rails = LLMRails(RailsConfig.from_path(str(ROOT / "config_execution")))
-    rails.register_action(inspect_reference_result, name="inspect_reference_result")
+    rails.register_action(action, name=action_name)
     try:
-        events = await rails.generate_events_async(
-            [
-                new_event_dict(
-                    "UserToolMessages",
-                    tool_messages=[
-                        {
-                            "content": raw_result,
-                            "name": "fetch_reference",
-                            "tool_call_id": tool_call_id,
-                        }
-                    ],
-                )
-            ]
-        )
+        events = await rails.generate_events_async([event])
     except Exception as exc:
-        raise RuntimeError("Tool-result rail failed; nothing will be forwarded") from exc
+        raise RuntimeError("Tool rail failed; nothing will be forwarded") from exc
     completed = [
         event
         for event in events
         if event["type"] == "InternalSystemActionFinished"
-        and event.get("action_name") == "inspect_reference_result"
+        and event.get("action_name") == action_name
         and event.get("is_success")
     ]
     if len(completed) != 1:
-        raise RuntimeError("Result inspection did not complete; nothing will be forwarded")
+        raise RuntimeError("Inspection did not complete; nothing will be forwarded")
     verdict = completed[0]["return_value"]
-    finished = any(e["type"] == "ToolInputRailsFinished" for e in events)
-    if verdict["allowed"] and not finished:
-        raise RuntimeError("Tool-input rails did not finish; nothing will be forwarded")
-    if not verdict["allowed"] and finished:
-        raise RuntimeError("Denied result did not stop the rail; nothing will be forwarded")
+    finished = any(e["type"] == finished_event for e in events)
+    if bool(verdict["allowed"]) != finished:
+        raise RuntimeError("Unexpected rail completion; nothing will be forwarded")
     return verdict
 
 
+async def inspect_call_with_rails(call):
+    return await _run_inspection(
+        new_event_dict("BotToolCalls", tool_calls=[call]),
+        inspect_reference_call,
+        "inspect_reference_call",
+        "ToolOutputRailsFinished",
+    )
+
+
+async def inspect_with_rails(raw_result, tool_call_id="reference-1"):
+    return await _run_inspection(
+        new_event_dict(
+            "UserToolMessages",
+            tool_messages=[
+                {
+                    "content": raw_result,
+                    "name": "fetch_reference",
+                    "tool_call_id": tool_call_id,
+                }
+            ],
+        ),
+        inspect_reference_result,
+        "inspect_reference_result",
+        "ToolInputRailsFinished",
+    )
+
+
 class ToolResultRejected(RuntimeError):
-    """Stop the graph before an unapproved result enters agent history."""
+    """Stop the graph when tool arguments or results are rejected."""
 
     def __init__(self, verdict):
         super().__init__(verdict["reason"])
@@ -107,33 +134,41 @@ class ToolResultRejected(RuntimeError):
 
 
 class ToolResultRailsMiddleware(AgentMiddleware):
-    """Bridge the agent's actual tool execution to NeMo's tool-input rail."""
+    """Bridge both sides of actual tool execution to NeMo rails."""
 
     def __init__(self):
         self.verdicts = []
 
-    async def awrap_tool_call(self, request, handler):
-        call = request.tool_call
-        if call["name"] != "fetch_reference":
-            verdict = {"allowed": False, "status": "blocked", "reason": "Tool not enabled in demo"}
-        else:
-            try:
-                result = await handler(request)
-                if not isinstance(result, ToolMessage) or result.status == "error":
-                    raise RuntimeError("Tool execution failed")
-                verdict = await inspect_with_rails(result.content, call["id"])
-            except Exception:  # noqa: BLE001 - fail closed without exposing tool/provider errors
-                # Never turn a rejected/raw result or exception payload into model context.
-                verdict = {
-                    "allowed": False,
-                    "status": "error",
-                    "reason": "Tool or inspection failed",
-                }
-        verdict = {**verdict, "tool_call_id": call["id"], "tool": call["name"]}
+    def record(self, verdict, call, stage):
+        verdict = {**verdict, "tool_call_id": call["id"], "tool": call["name"], "stage": stage}
         self.verdicts.append(verdict)
         if not verdict["allowed"]:
             raise ToolResultRejected(verdict)
-        # Construct a fresh message so raw artifacts/metadata cannot bypass inspection.
+        return verdict
+
+    async def awrap_tool_call(self, request, handler):
+        call = request.tool_call
+        stage = "tool_input"
+        try:
+            self.record(await inspect_call_with_rails(call), call, stage)
+            stage = "tool_output"
+            result = await handler(request)
+            if not isinstance(result, ToolMessage) or result.status == "error":
+                raise RuntimeError("Tool execution failed")
+            verdict = self.record(await inspect_with_rails(result.content, call["id"]), call, stage)
+        except ToolResultRejected:
+            raise
+        except Exception:  # noqa: BLE001 - fail closed without exposing tool/provider errors
+            self.record(
+                {
+                    "allowed": False,
+                    "status": "error",
+                    "reason": "Tool or inspection failed",
+                },
+                call,
+                stage,
+            )
+        # Drop raw artifacts/metadata; only approved content enters agent history.
         return ToolMessage(content=verdict["content"], tool_call_id=call["id"], name=call["name"])
 
 
@@ -166,7 +201,9 @@ async def run_demo(scenario, model):
 
 def main():
     parser = argparse.ArgumentParser(description="NeMo execution-boundary tool-result inspection")
-    parser.add_argument("scenario", choices=SCENARIOS, nargs="?", default="public")
+    parser.add_argument(
+        "scenario", choices=(*SCENARIOS, "input_blocked"), nargs="?", default="public"
+    )
     # Retain the previous CLI spelling; every run now uses the live agent.
     parser.add_argument("--summarize", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -181,13 +218,17 @@ def main():
         max_retries=0,
     )
     verdict, output = asyncio.run(run_demo(args.scenario, model))
-    print(f"tool=fetch_reference; rail=inspect reference result; status={verdict['status']}")
+    print(f"tool={verdict['tool']}; stage={verdict['stage']}; status={verdict['status']}")
     print(f"agent tool_call_id={verdict['tool_call_id']}")
     print(verdict["reason"])
     if output is not None:
         print(output)
     else:
-        print("Blocked before agent continuation.")
+        print(
+            "Blocked before tool execution."
+            if verdict["stage"] == "tool_input"
+            else "Blocked before agent continuation."
+        )
     return 0 if verdict["allowed"] else 2
 
 

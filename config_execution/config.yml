@@ -1,5 +1,8 @@
 models: []
 rails:
+  tool_output:
+    flows:
+      - inspect reference call
   tool_input:
     flows:
       - inspect reference result

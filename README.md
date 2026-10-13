@@ -96,11 +96,11 @@ Live verification with the configured NVIDIA safety endpoint and Gemini through 
 | Execute `SELECT * FROM customers` against the database | Company-policy refusal returned |
 | Explain `SELECT * FROM customers` without executing it | SQL explanation returned |
 
-## Execution-boundary tool-result inspection demo
+## Execution-boundary tool input and output inspection demo
 
-`execution_rails_demo.py` demonstrates inspecting a tool's result **before the model receives it**. In the pinned NeMo version, the supported result-rail configuration is `rails.tool_input`, because the tool result is input to the model. This is a tool-result rail at the execution boundary; it is not a generic `rails.execution.flows` hook. See NVIDIA's [tool-calling guide](https://docs.nvidia.com/nemo/guardrails/configure-guardrails/guardrail-catalog/tool-calling).
+`execution_rails_demo.py` inspects **tool arguments before execution** and **tool results before the model receives them**. Tool arguments use `rails.tool_output` (output from the model); tool results use `rails.tool_input` (input to the model). CLI `stage=tool_input` / `stage=tool_output` labels use the tool perspective instead. In the pinned NeMo version, the supported result-rail configuration is `rails.tool_input`, because the tool result is input to the model. This is a tool-result rail at the execution boundary; it is not a generic `rails.execution.flows` hook. See NVIDIA's [tool-calling guide](https://docs.nvidia.com/nemo/guardrails/configure-guardrails/guardrail-catalog/tool-calling).
 
-The in-memory `fetch_reference` tool returns synthetic data. NeMo's event API runs the Colang flow in `config_execution/rails.co`, which invokes a Python inspection action. That action validates the JSON structure and success status, removes uninspected extra fields, redacts a synthetic credential, and blocks specific instruction-override phrases. There are no self-check functions or Nemotron calls in this separate demo; the result checks are deterministic examples.
+The input rail allows only `fetch_reference`, requires exactly one argument named `scenario`, and validates it against the five supported scenario strings. Missing, extra, incorrectly typed, or unsupported arguments stop execution. `input_blocked` deliberately requests an unsupported scenario. The in-memory `fetch_reference` tool returns synthetic data. NeMo's event API runs the Colang flow in `config_execution/rails.co`, which invokes a Python inspection action. That action validates the JSON structure and success status, removes uninspected extra fields, redacts a synthetic credential, and blocks specific instruction-override phrases. There are no self-check functions or Nemotron calls in this separate demo; the result checks are deterministic examples.
 
 ```bash
 uv run --locked python execution_rails_demo.py public
@@ -108,23 +108,25 @@ uv run --locked python execution_rails_demo.py credentials
 uv run --locked python execution_rails_demo.py injection
 uv run --locked python execution_rails_demo.py malformed
 uv run --locked python execution_rails_demo.py tool_error
+uv run --locked python execution_rails_demo.py input_blocked
 ```
 
-| Scenario | Result before model delivery |
+| Scenario | Guardrail outcome |
 | --- | --- |
+| `input_blocked` | Input blocked; tool never executes |
 | `public` | Passed; approved JSON available to the model |
 | `credentials` | Modified; synthetic API key replaced with `[REDACTED]` |
 | `injection` | Blocked; agent cannot continue after the tool call |
 | `malformed` | Blocked; unexpected HTML rejected |
 | `tool_error` | Blocked; failed upstream response rejected |
 
-Every CLI run now uses a live Deep Agent with native `ChatGoogleGenerativeAI`, configured by `AGENT_API_KEY` (or `GOOGLE_API_KEY`) and `AGENT_MODEL`. The agent chooses and calls `fetch_reference`. Custom `ToolResultRailsMiddleware` uses LangChain's `awrap_tool_call` hook to run the tool, submit its actual result and call ID to NeMo, and return a fresh sanitized `ToolMessage` only after approval. The original assistant tool call remains in history. `--summarize` remains accepted for compatibility but is no longer required.
+Every CLI run now uses a live Deep Agent with native `ChatGoogleGenerativeAI`, configured by `AGENT_API_KEY` (or `GOOGLE_API_KEY`) and `AGENT_MODEL`. The agent chooses and calls `fetch_reference`. Custom `ToolResultRailsMiddleware` uses LangChain's `awrap_tool_call` hook to submit the tool name and arguments to NeMo before running the tool, then submit its actual result and call ID to NeMo, and return a fresh sanitized `ToolMessage` only after approval. The original assistant tool call remains in history. `--summarize` remains accepted for compatibility but is no longer required.
 
-The sequence is: **agent tool call → tool execution → NeMo result rail → sanitized tool message → agent continuation**. Rejection or inspection failure stops the graph before continuation and returns CLI exit code 2. The initial model call has already happened. Other tools, including built-in delegation and filesystem tools, are blocked before execution in this focused demo. This is a custom bridge to the real NeMo Colang rail, not tool-result support supplied by the existing `GuardrailsMiddleware`.
+The sequence is: **agent tool call → NeMo argument rail → tool execution → NeMo result rail → sanitized tool message → agent continuation**. Rejection or inspection failure stops the graph before continuation and returns CLI exit code 2. The initial model call has already happened. Other tools, including built-in delegation and filesystem tools, are blocked before execution in this focused demo. This is a custom bridge to the real NeMo Colang rail, not tool-result support supplied by the existing `GuardrailsMiddleware`.
 
 These narrow example patterns are not comprehensive credential or prompt-injection detection. Result inspection happens after the tool runs and cannot undo its side effects. Raw results exist within tool execution and may appear in externally configured tool tracing; this boundary protects agent context. The other demos' shared content-safety configuration is unchanged; this demo focuses on the result boundary and does not check the model's final answer.
 
-Integration tests run the real compiled Deep Agents graph and NeMo rail with a scripted model that emits tool calls. They verify execution order, real tool-message IDs, sanitized graph state, allowed/redacted results, blocked results, inspection failures, and rejection of other tools. Scripted model tests require no API keys.
+Integration tests run the real compiled Deep Agents graph and NeMo rail with a scripted model that emits tool calls. They verify execution order, real tool-message IDs, sanitized graph state, allowed/redacted results, blocked results, inspection failures, and rejection of other tools. Input tests additionally verify that invalid arguments and inspector failures cause zero tool executions. Scripted model tests require no API keys.
 
 ## Offline verification
 

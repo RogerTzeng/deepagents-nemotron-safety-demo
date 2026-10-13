@@ -81,7 +81,10 @@ def test_execution_order_and_sanitized_graph_state(monkeypatch):
     agent, guard = build_execution_agent(model)
     state = asyncio.run(agent.ainvoke({"messages": [HumanMessage(content="credentials")]}))
     assert executed == ["credentials"]
-    assert guard.verdicts[0]["status"] == "modified"
+    assert [(v["stage"], v["status"]) for v in guard.verdicts] == [
+        ("tool_input", "passed"),
+        ("tool_output", "modified"),
+    ]
     assert "DEMO_ONLY_TOKEN_123456" not in repr(state)
     assert "[REDACTED]" in repr(state)
 
@@ -118,3 +121,57 @@ def test_no_tool_call_is_not_reported_as_success():
     model = RecordingModel(responses=[AIMessage(content="Skipped the tool")])
     with pytest.raises(RuntimeError, match="did not call"):
         asyncio.run(run_demo("public", model))
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"scenario": 123},
+        {"scenario": "input_blocked"},
+        {"scenario": "public", "sql": "SELECT * FROM secrets"},
+    ],
+)
+def test_input_rejection_prevents_tool_execution(monkeypatch, args):
+    executed = []
+
+    def fetch_reference(scenario: str) -> str:
+        """Spy on actual tool execution."""
+        executed.append(scenario)
+        return "must not execute"
+
+    monkeypatch.setattr("execution_rails_demo.fetch_reference", fetch_reference)
+    model = scripted_model("public")
+    model.responses[0].tool_calls[0]["args"] = args
+    verdict, answer = asyncio.run(run_demo("public", model))
+    assert verdict["stage"] == "tool_input"
+    assert verdict["status"] == "blocked"
+    assert verdict["reason"] == "Unsupported tool arguments"
+    assert not executed
+    assert answer is None
+    assert len(model.calls) == 1
+
+
+def test_input_inspection_failure_prevents_tool_execution(monkeypatch):
+    inspected = []
+    executed = []
+
+    async def fail(tool_calls):
+        inspected.append(tool_calls)
+        raise RuntimeError("scripted input inspector failure")
+
+    def fetch_reference(scenario: str) -> str:
+        """Spy on actual tool execution."""
+        executed.append(scenario)
+        return "must not execute"
+
+    monkeypatch.setattr("execution_rails_demo.inspect_reference_call", fail)
+    monkeypatch.setattr("execution_rails_demo.fetch_reference", fetch_reference)
+    model = scripted_model("public")
+    verdict, answer = asyncio.run(run_demo("public", model))
+    assert inspected
+    assert not executed
+    assert verdict["stage"] == "tool_input"
+    assert verdict["status"] == "error"
+    assert answer is None
+    assert len(model.calls) == 1

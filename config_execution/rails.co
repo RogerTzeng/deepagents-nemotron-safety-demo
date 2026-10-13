@@ -7,3 +7,12 @@ define flow inspect reference result
 
 define bot refuse tool result
   "The tool result was blocked before it reached the agent."
+
+define flow inspect reference call
+  $inspection = execute inspect_reference_call(tool_calls=$tool_calls)
+  if not $inspection.allowed
+    bot refuse tool call
+    abort
+
+define bot refuse tool call
+  "The tool call was blocked before execution."
